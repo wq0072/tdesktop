@@ -91,7 +91,7 @@ void BlockPeerBoxController::prepareViewHook() {
 	session().changes().peerUpdates(
 		Data::PeerUpdate::Flag::IsBlocked
 	) | rpl::start_with_next([=](const Data::PeerUpdate &update) {
-		if (auto row = delegate()->peerListFindRow(update.peer->id)) {
+		if (auto row = delegate()->peerListFindRow(update.peer->id.value)) {
 			updateIsBlocked(row, update.peer);
 			delegate()->peerListUpdateRow(row);
 		}
@@ -136,8 +136,6 @@ AdminLog::OwnedItem GenerateForwardedItem(
 	// #TODO common global incrementable id for fake items, like clientMsgId.
 	static auto id = ServerMaxMsgId + (ServerMaxMsgId / 6);
 	const auto flags = Flag::f_from_id | Flag::f_fwd_from;
-	const auto replyTo = 0;
-	const auto viaBotId = 0;
 	const auto item = MTP_message(
 		MTP_flags(flags),
 		MTP_int(++id),
@@ -286,7 +284,7 @@ void BlockedBoxController::handleBlockedEvent(not_null<PeerData*> user) {
 			delegate()->peerListRefreshRows();
 			delegate()->peerListScrollToTop();
 		}
-	} else if (auto row = delegate()->peerListFindRow(user->id)) {
+	} else if (auto row = delegate()->peerListFindRow(user->id.value)) {
 		delegate()->peerListRemoveRow(row);
 		delegate()->peerListRefreshRows();
 	}
@@ -304,13 +302,13 @@ void BlockedBoxController::BlockNewPeer(
 		});
 		box->addButton(tr::lng_cancel(), [box] { box->closeBox(); });
 	};
-	Ui::show(
+	window->show(
 		Box<PeerListBox>(std::move(controller), std::move(initBox)),
 		Ui::LayerOption::KeepOther);
 }
 
 bool BlockedBoxController::appendRow(not_null<PeerData*> peer) {
-	if (delegate()->peerListFindRow(peer->id)) {
+	if (delegate()->peerListFindRow(peer->id.value)) {
 		return false;
 	}
 	delegate()->peerListAppendRow(createRow(peer));
@@ -318,7 +316,7 @@ bool BlockedBoxController::appendRow(not_null<PeerData*> peer) {
 }
 
 bool BlockedBoxController::prependRow(not_null<PeerData*> peer) {
-	if (delegate()->peerListFindRow(peer->id)) {
+	if (delegate()->peerListFindRow(peer->id.value)) {
 		return false;
 	}
 	delegate()->peerListPrependRow(createRow(peer));
@@ -515,7 +513,6 @@ void LastSeenPrivacyController::confirmSave(
 		bool someAreDisallowed,
 		FnMut<void()> saveCallback) {
 	if (someAreDisallowed && !Core::App().settings().lastSeenWarningSeen()) {
-		const auto session = _session;
 		auto callback = [
 			=,
 			saveCallback = std::move(saveCallback)
@@ -691,7 +688,7 @@ rpl::producer<QString> CallsPeer2PeerPrivacyController::exceptionsDescription() 
 
 ForwardsPrivacyController::ForwardsPrivacyController(
 	not_null<Window::SessionController*> controller)
-: SimpleElementDelegate(controller)
+: SimpleElementDelegate(controller, [] {})
 , _controller(controller) {
 }
 
@@ -746,7 +743,7 @@ object_ptr<Ui::RpWidget> ForwardsPrivacyController::setupAboveWidget(
 	auto message = GenerateForwardedItem(
 		delegate(),
 		_controller->session().data().history(
-			peerFromUser(PeerData::kServiceNotificationsId)),
+			PeerData::kServiceNotificationsId),
 		tr::lng_edit_privacy_forwards_sample_message(tr::now));
 	const auto view = message.get();
 
@@ -841,7 +838,6 @@ void ForwardsPrivacyController::PaintForwardedTooltip(
 	const auto textWidth = font->width(text);
 	const auto arrowSkip = st::settingsForwardPrivacyArrowSkip;
 	const auto arrowSize = st::settingsForwardPrivacyArrowSize;
-	const auto fullWidth = std::max(textWidth, 2 * arrowSkip);
 	const auto padding = st::settingsForwardPrivacyTooltipPadding;
 	const auto rect = QRect(0, 0, textWidth, font->height).marginsAdded(
 		padding

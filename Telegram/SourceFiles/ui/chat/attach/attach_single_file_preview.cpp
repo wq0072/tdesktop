@@ -8,6 +8,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/chat/attach/attach_single_file_preview.h"
 
 #include "ui/chat/attach/attach_prepare.h"
+#include "ui/text/format_song_name.h"
 #include "ui/text/format_values.h"
 #include "ui/text/text_options.h"
 #include "ui/widgets/buttons.h"
@@ -91,7 +92,8 @@ void SingleFilePreview::preparePreview(const PreparedFile &file) {
 	if (filepath.isEmpty()) {
 		auto filename = "image.png";
 		_name = filename;
-		_statusText = u"%1x%2"_q.arg(preview.width()).arg(preview.height());
+		_statusText = FormatImageSizeText(preview.size()
+			/ preview.devicePixelRatio());
 		_fileIsImage = true;
 	} else {
 		auto fileinfo = QFileInfo(filepath);
@@ -115,15 +117,13 @@ void SingleFilePreview::preparePreview(const PreparedFile &file) {
 			}
 		}
 
-		_name = ComposeNameString(filename, songTitle, songPerformer);
+		_name = Text::FormatSongName(filename, songTitle, songPerformer)
+			.string();
 		_statusText = FormatSizeText(fileinfo.size());
 	}
 	const auto &st = !isThumbedLayout()
 		? st::attachPreviewLayout
 		: st::attachPreviewThumbLayout;
-	const auto nameleft = st.thumbSize + st.padding.right();
-	const auto nametop = st.nameTop;
-	const auto statustop = st.statusTop;
 	const auto availableFileWidth = st::sendMediaPreviewSize
 		- st.thumbSize
 		- st.padding.right()
@@ -146,7 +146,6 @@ void SingleFilePreview::paintEvent(QPaintEvent *e) {
 	Painter p(this);
 
 	auto w = width() - st::boxPhotoPadding.left() - st::boxPhotoPadding.right();
-	auto h = height();
 	const auto &st = !isThumbedLayout()
 		? st::attachPreviewLayout
 		: st::attachPreviewThumbLayout;

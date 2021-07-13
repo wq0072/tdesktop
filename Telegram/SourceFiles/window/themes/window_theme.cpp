@@ -27,6 +27,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "main/main_account.h" // Account::local.
 #include "main/main_domain.h" // Domain::activeSessionValue.
 #include "ui/image/image.h"
+#include "ui/ui_utility.h"
 #include "boxes/confirm_box.h"
 #include "boxes/background_box.h"
 #include "core/application.h"
@@ -461,7 +462,6 @@ SendMediaReady PrepareWallPaper(MTP::DcId dcId, const QImage &image) {
 	const auto push = [&](const char *type, QImage &&image) {
 		sizes.push_back(MTP_photoSize(
 			MTP_string(type),
-			MTP_fileLocationToBeDeprecated(MTP_long(0), MTP_int(0)),
 			MTP_int(image.width()),
 			MTP_int(image.height()), MTP_int(0)));
 		thumbnails.emplace(
@@ -755,10 +755,10 @@ void ChatBackground::preparePixmaps(QImage image) {
 				imageForTiledBytes += imageForTiled.bytesPerLine() - (repeatTimesX * bytesInLine);
 			}
 		}
-		_pixmapForTiled = App::pixmapFromImageInPlace(std::move(imageForTiled));
+		_pixmapForTiled = Ui::PixmapFromImage(std::move(imageForTiled));
 	}
 	_isMonoColorImage = CalculateIsMonoColorImage(image);
-	_pixmap = App::pixmapFromImageInPlace(std::move(image));
+	_pixmap = Ui::PixmapFromImage(std::move(image));
 	if (!isSmallForTiled) {
 		_pixmapForTiled = _pixmap;
 	}
@@ -1367,7 +1367,6 @@ QColor CountAverageColor(const QImage &image) {
 	Expects(image.format() == QImage::Format_ARGB32_Premultiplied);
 
 	uint64 components[3] = { 0 };
-	uint64 componentsScroll[3] = { 0 };
 	const auto w = image.width();
 	const auto h = image.height();
 	const auto size = w * h;

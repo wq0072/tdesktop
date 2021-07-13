@@ -188,12 +188,13 @@ GifsListWidget::GifsListWidget(
 		update();
 	}, lifetime());
 
-	subscribe(controller->gifPauseLevelChanged(), [=] {
+	controller->gifPauseLevelChanged(
+	) | rpl::start_with_next([=] {
 		if (!controller->isGifPausedAtLeastFor(
 				Window::GifPauseReason::SavedGifs)) {
 			update();
 		}
-	});
+	}, lifetime());
 }
 
 rpl::producer<TabbedSelector::FileChosen> GifsListWidget::fileChosen() const {
@@ -918,7 +919,7 @@ bool GifsListWidget::refreshInlineRows(int32 *added) {
 
 int32 GifsListWidget::showInlineRows(bool newResults) {
 	auto added = 0;
-	auto clear = !refreshInlineRows(&added);
+	refreshInlineRows(&added);
 	if (newResults) {
 		scrollTo(0);
 	}

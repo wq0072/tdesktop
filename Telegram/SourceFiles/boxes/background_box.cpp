@@ -21,7 +21,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "boxes/background_preview_box.h"
 #include "boxes/confirm_box.h"
 #include "window/window_session_controller.h"
-#include "app.h"
 #include "styles/style_overview.h"
 #include "styles/style_layers.h"
 #include "styles/style_boxes.h"
@@ -151,7 +150,7 @@ void BackgroundBox::prepare() {
 
 	_inner->chooseEvents(
 	) | rpl::start_with_next([=](const Data::WallPaper &paper) {
-		Ui::show(
+		_controller->show(
 			Box<BackgroundPreviewBox>(_controller, paper),
 			Ui::LayerOption::KeepOther);
 	}, _inner->lifetime());
@@ -176,7 +175,7 @@ void BackgroundBox::removePaper(const Data::WallPaper &paper) {
 			paper.mtpSettings()
 		)).send();
 	};
-	Ui::show(
+	_controller->show(
 		Box<ConfirmBox>(
 			tr::lng_background_sure_delete(tr::now),
 			tr::lng_selected_delete(tr::now),
@@ -337,7 +336,7 @@ void BackgroundBox::Inner::validatePaperThumbnail(
 			Data::PatternColor(color),
 			paper.data.patternIntensity());
 	}
-	paper.thumbnail = App::pixmapFromImageInPlace(TakeMiddleSample(
+	paper.thumbnail = Ui::PixmapFromImage(TakeMiddleSample(
 		original,
 		st::backgroundSize));
 	paper.thumbnail.setDevicePixelRatio(cRetinaFactor());

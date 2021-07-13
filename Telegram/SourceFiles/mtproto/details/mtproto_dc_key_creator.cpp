@@ -502,8 +502,8 @@ void DcKeyCreator::dhClientParamsSend(not_null<Attempt*> attempt) {
 	AuthKey::FillData(attempt->authKey, computedAuthKey);
 
 	auto auth_key_sha = openssl::Sha1(attempt->authKey);
-	memcpy(&attempt->data.auth_key_aux_hash, auth_key_sha.data(), 8);
-	memcpy(&attempt->data.auth_key_hash, auth_key_sha.data() + 12, 8);
+	memcpy(&attempt->data.auth_key_aux_hash.v, auth_key_sha.data(), 8);
+	memcpy(&attempt->data.auth_key_hash.v, auth_key_sha.data() + 12, 8);
 
 	const auto client_dh_inner = MTP_client_DH_inner_data(
 		attempt->data.nonce,
@@ -566,7 +566,6 @@ void DcKeyCreator::dhClientParamsAnswered(
 			return failed();
 		}
 		attempt->data.new_nonce_buf[32] = bytes::type(2);
-		uchar sha1Buffer[20];
 		if (data.vnew_nonce_hash2() != NonceDigest(attempt->data.new_nonce_buf)) {
 			LOG(("AuthKey Error: received new_nonce_hash2 did not match!"));
 			DEBUG_LOG(("AuthKey Error: received new_nonce_hash2: %1, new_nonce_buf: %2").arg(Logs::mb(&data.vnew_nonce_hash2(), 16).str(), Logs::mb(attempt->data.new_nonce_buf.data(), 41).str()));
@@ -586,7 +585,6 @@ void DcKeyCreator::dhClientParamsAnswered(
 			return failed();
 		}
 		attempt->data.new_nonce_buf[32] = bytes::type(3);
-		uchar sha1Buffer[20];
 		if (data.vnew_nonce_hash3() != NonceDigest(attempt->data.new_nonce_buf)) {
 			LOG(("AuthKey Error: received new_nonce_hash3 did not match!"));
 			DEBUG_LOG(("AuthKey Error: received new_nonce_hash3: %1, new_nonce_buf: %2").arg(Logs::mb(&data.vnew_nonce_hash3(), 16).str(), Logs::mb(attempt->data.new_nonce_buf.data(), 41).str()));
