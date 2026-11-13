@@ -10,6 +10,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "calls/group/calls_group_call.h"
 #include "calls/group/calls_group_settings.h"
 #include "calls/group/calls_group_panel.h"
+#include "calls/group/ui/calls_group_recording_box.h"
 #include "data/data_peer.h"
 #include "data/data_group_call.h"
 #include "info/profile/info_profile_values.h" // Info::Profile::NameValue.
@@ -18,104 +19,23 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/widgets/menu/menu_action.h"
 #include "ui/widgets/labels.h"
 #include "ui/widgets/checkbox.h"
-#include "ui/widgets/input_fields.h"
+#include "ui/widgets/fields/input_field.h"
 #include "ui/effects/ripple_animation.h"
 #include "ui/layers/generic_box.h"
+#include "ui/painter.h"
 #include "lang/lang_keys.h"
 #include "base/unixtime.h"
 #include "base/timer_rpl.h"
 #include "styles/style_calls.h"
 #include "styles/style_layers.h"
-#include "styles/style_boxes.h"
 
 namespace Calls::Group {
 namespace {
 
-constexpr auto kMaxGroupCallLength = 40;
-
-void EditGroupCallTitleBox(
-		not_null<Ui::GenericBox*> box,
-		const QString &placeholder,
-		const QString &title,
-		bool livestream,
-		Fn<void(QString)> done) {
-	box->setTitle(livestream
-		? tr::lng_group_call_edit_title_channel()
-		: tr::lng_group_call_edit_title());
-	const auto input = box->addRow(object_ptr<Ui::InputField>(
-		box,
-		st::groupCallField,
-		rpl::single(placeholder),
-		title));
-	input->setMaxLength(kMaxGroupCallLength);
-	box->setFocusCallback([=] {
-		input->setFocusFast();
-	});
-	const auto submit = [=] {
-		const auto result = input->getLastText().trimmed();
-		box->closeBox();
-		done(result);
-	};
-	QObject::connect(input, &Ui::InputField::submitted, submit);
-	box->addButton(tr::lng_settings_save(), submit);
-	box->addButton(tr::lng_cancel(), [=] { box->closeBox(); });
-}
-
-void StartGroupCallRecordingBox(
-		not_null<Ui::GenericBox*> box,
-		const QString &title,
-		Fn<void(QString)> done) {
-	box->setTitle(tr::lng_group_call_recording_start());
-
-	box->addRow(
-		object_ptr<Ui::FlatLabel>(
-			box.get(),
-			tr::lng_group_call_recording_start_sure(),
-			st::groupCallBoxLabel));
-
-	const auto input = box->addRow(object_ptr<Ui::InputField>(
-		box,
-		st::groupCallField,
-		tr::lng_group_call_recording_start_field(),
-		title));
-	box->setFocusCallback([=] {
-		input->setFocusFast();
-	});
-	const auto submit = [=] {
-		const auto result = input->getLastText().trimmed();
-		box->closeBox();
-		done(result);
-	};
-	QObject::connect(input, &Ui::InputField::submitted, submit);
-	box->addButton(tr::lng_group_call_recording_start_button(), submit);
-	box->addButton(tr::lng_cancel(), [=] { box->closeBox(); });
-}
-
-void StopGroupCallRecordingBox(
-		not_null<Ui::GenericBox*> box,
-		Fn<void(QString)> done) {
-	box->addRow(
-		object_ptr<Ui::FlatLabel>(
-			box.get(),
-			tr::lng_group_call_recording_stop_sure(),
-			st::groupCallBoxLabel),
-		style::margins(
-			st::boxRowPadding.left(),
-			st::boxPadding.top(),
-			st::boxRowPadding.right(),
-			st::boxPadding.bottom()));
-
-	box->addButton(tr::lng_box_ok(), [=] {
-		box->closeBox();
-		done(QString());
-	});
-	box->addButton(tr::lng_cancel(), [=] { box->closeBox(); });
-}
-
 class JoinAsAction final : public Ui::Menu::ItemBase {
 public:
 	JoinAsAction(
-		not_null<Ui::RpWidget*> parent,
+		not_null<Ui::Menu::Menu*> parent,
 		const style::Menu &st,
 		not_null<PeerData*> peer,
 		Fn<void()> callback);
@@ -138,7 +58,7 @@ private:
 	const not_null<QAction*> _dummyAction;
 	const style::Menu &_st;
 	const not_null<PeerData*> _peer;
-	std::shared_ptr<Data::CloudImageView> _userpicView;
+	Ui::PeerUserpicView _userpicView;
 
 	Ui::Text::String _text;
 	Ui::Text::String _name;
@@ -151,7 +71,7 @@ private:
 class RecordingAction final : public Ui::Menu::ItemBase {
 public:
 	RecordingAction(
-		not_null<Ui::RpWidget*> parent,
+		not_null<Ui::Menu::Menu*> parent,
 		const style::Menu &st,
 		rpl::producer<QString> text,
 		rpl::producer<TimeId> startAtValues,
@@ -188,14 +108,14 @@ private:
 };
 
 TextParseOptions MenuTextOptions = {
-	TextParseLinks | TextParseRichText, // flags
+	TextParseLinks, // flags
 	0, // maxw
 	0, // maxh
 	Qt::LayoutDirectionAuto, // dir
 };
 
 JoinAsAction::JoinAsAction(
-	not_null<Ui::RpWidget*> parent,
+	not_null<Ui::Menu::Menu*> parent,
 	const style::Menu &st,
 	not_null<PeerData*> peer,
 	Fn<void()> callback)
@@ -207,11 +127,11 @@ JoinAsAction::JoinAsAction(
 	+ st::groupCallJoinAsPhotoSize
 	+ st::groupCallJoinAsPadding.bottom()) {
 	setAcceptBoth(true);
-	initResizeHook(parent->sizeValue());
-	setClickedCallback(std::move(callback));
+	fitToMenuWidth();
+	setActionTriggered(std::move(callback));
 
 	paintRequest(
-	) | rpl::start_with_next([=] {
+	) | rpl::on_next([=] {
 		Painter p(this);
 		paint(p);
 	}, lifetime());
@@ -261,10 +181,10 @@ void JoinAsAction::prepare() {
 	rpl::combine(
 		tr::lng_group_call_display_as_header(),
 		Info::Profile::NameValue(_peer)
-	) | rpl::start_with_next([=](QString text, TextWithEntities name) {
+	) | rpl::on_next([=](QString text, QString name) {
 		const auto &padding = st::groupCallJoinAsPadding;
 		_text.setMarkedText(_st.itemStyle, { text }, MenuTextOptions);
-		_name.setMarkedText(_st.itemStyle, name, MenuTextOptions);
+		_name.setMarkedText(_st.itemStyle, { name }, MenuTextOptions);
 		const auto textWidth = _text.maxWidth();
 		const auto nameWidth = _name.maxWidth();
 		const auto textLeft = padding.left()
@@ -296,7 +216,7 @@ QPoint JoinAsAction::prepareRippleStartPosition() const {
 }
 
 QImage JoinAsAction::prepareRippleMask() const {
-	return Ui::RippleAnimation::rectMask(size());
+	return Ui::RippleAnimation::RectMask(size());
 }
 
 int JoinAsAction::contentHeight() const {
@@ -314,7 +234,7 @@ void JoinAsAction::handleKeyPress(not_null<QKeyEvent*> e) {
 }
 
 RecordingAction::RecordingAction(
-	not_null<Ui::RpWidget*> parent,
+	not_null<Ui::Menu::Menu*> parent,
 	const style::Menu &st,
 	rpl::producer<QString> text,
 	rpl::producer<TimeId> startAtValues,
@@ -332,7 +252,7 @@ RecordingAction::RecordingAction(
 	+ st::groupCallRecordingTimerPadding.bottom()) {
 	std::move(
 		startAtValues
-	) | rpl::start_with_next([=](TimeId startAt) {
+	) | rpl::on_next([=](TimeId startAt) {
 		_startAt = startAt;
 		_startedAt = crl::now();
 		_refreshTimer.cancel();
@@ -341,11 +261,11 @@ RecordingAction::RecordingAction(
 	}, lifetime());
 
 	setAcceptBoth(true);
-	initResizeHook(parent->sizeValue());
-	setClickedCallback(std::move(callback));
+	fitToMenuWidth();
+	setActionTriggered(std::move(callback));
 
 	paintRequest(
-	) | rpl::start_with_next([=] {
+	) | rpl::on_next([=] {
 		Painter p(this);
 		paint(p);
 	}, lifetime());
@@ -423,7 +343,7 @@ void RecordingAction::prepare(rpl::producer<QString> text) {
 		_st.widthMax);
 	setMinWidth(w);
 
-	std::move(text) | rpl::start_with_next([=](QString text) {
+	std::move(text) | rpl::on_next([=](QString text) {
 		const auto &padding = _st.itemPadding;
 		_text.setMarkedText(_st.itemStyle, { text }, MenuTextOptions);
 		_textWidth = w - padding.left() - padding.right();
@@ -444,7 +364,7 @@ QPoint RecordingAction::prepareRippleStartPosition() const {
 }
 
 QImage RecordingAction::prepareRippleMask() const {
-	return Ui::RippleAnimation::rectMask(size());
+	return Ui::RippleAnimation::RectMask(size());
 }
 
 int RecordingAction::contentHeight() const {
@@ -495,10 +415,13 @@ void LeaveBox(
 		not_null<GroupCall*> call,
 		bool discardChecked,
 		BoxContext context) {
+	const auto conference = call->conference();
 	const auto livestream = call->peer()->isBroadcast();
 	const auto scheduled = (call->scheduleDate() != 0);
 	if (!scheduled) {
-		box->setTitle(livestream
+		box->setTitle(conference
+			? tr::lng_group_call_leave_title_call()
+			: livestream
 			? tr::lng_group_call_leave_title_channel()
 			: tr::lng_group_call_leave_title());
 	}
@@ -510,12 +433,14 @@ void LeaveBox(
 				? (livestream
 					? tr::lng_group_call_close_sure_channel()
 					: tr::lng_group_call_close_sure())
-				: (livestream
+				: (conference
+					? tr::lng_group_call_leave_sure_call()
+					: livestream
 					? tr::lng_group_call_leave_sure_channel()
 					: tr::lng_group_call_leave_sure())),
 			(inCall ? st::groupCallBoxLabel : st::boxLabel)),
 		scheduled ? st::boxPadding : st::boxRowPadding);
-	const auto discard = call->peer()->canManageGroupCall()
+	const auto discard = call->canManage()
 		? box->addRow(object_ptr<Ui::Checkbox>(
 			box.get(),
 			(scheduled
@@ -534,7 +459,7 @@ void LeaveBox(
 				st::boxRowPadding.right(),
 				st::boxRowPadding.bottom()))
 		: nullptr;
-	const auto weak = base::make_weak(call.get());
+	const auto weak = base::make_weak(call);
 	auto label = scheduled
 		? tr::lng_group_call_close()
 		: tr::lng_group_call_leave();
@@ -553,50 +478,37 @@ void LeaveBox(
 	box->addButton(tr::lng_cancel(), [=] { box->closeBox(); });
 }
 
-void ConfirmBoxBuilder(
-		not_null<Ui::GenericBox*> box,
-		ConfirmBoxArgs &&args) {
-	const auto label = box->addRow(
-		object_ptr<Ui::FlatLabel>(
-			box.get(),
-			rpl::single(args.text),
-			args.st ? *args.st : st::groupCallBoxLabel),
-		st::boxPadding);
-	if (args.callback) {
-		box->addButton(std::move(args.button), std::move(args.callback));
-	}
-	if (args.filter) {
-		label->setClickHandlerFilter(std::move(args.filter));
-	}
-	box->addButton(tr::lng_cancel(), [=] { box->closeBox(); });
+object_ptr<Ui::GenericBox> ConfirmBox(Ui::ConfirmBoxArgs &&args) {
+	auto copy = std::move(args);
+	copy.labelStyle = &st::groupCallBoxLabel;
+	return Ui::MakeConfirmBox(std::move(copy));
 }
 
 void FillMenu(
 		not_null<Ui::DropdownMenu*> menu,
 		not_null<PeerData*> peer,
 		not_null<GroupCall*> call,
-		bool wide,
 		Fn<void()> chooseJoinAs,
-		Fn<void()> chooseShareScreenSource,
 		Fn<void(object_ptr<Ui::BoxContent>)> showBox) {
-	const auto weak = base::make_weak(call.get());
+	const auto weak = base::make_weak(call);
 	const auto resolveReal = [=] {
-		const auto real = peer->groupCall();
-		const auto strong = weak.get();
-		return (real && strong && (real->id() == strong->id()))
-			? real
-			: nullptr;
+		if (const auto strong = weak.get()) {
+			if (const auto real = strong->lookupReal()) {
+				return real;
+			}
+		}
+		return (Data::GroupCall*)nullptr;
 	};
 	const auto real = resolveReal();
 	if (!real) {
 		return;
 	}
 
+	const auto conference = call->conference();
 	const auto addEditJoinAs = call->showChooseJoinAs();
-	const auto addEditTitle = call->canManage();
-	const auto addEditRecording = call->canManage() && !real->scheduleDate();
-	const auto addScreenCast = !wide
-		&& call->videoIsWorking()
+	const auto addEditTitle = !conference && call->canManage();
+	const auto addEditRecording = !conference
+		&& call->canManage()
 		&& !real->scheduleDate();
 	if (addEditJoinAs) {
 		menu->addAction(MakeJoinAsAction(
@@ -619,7 +531,7 @@ void FillMenu(
 			if (const auto real = resolveReal()) {
 				showBox(Box(
 					EditGroupCallTitleBox,
-					peer->name,
+					peer->name(),
 					real->title(),
 					livestream,
 					done));
@@ -632,10 +544,15 @@ void FillMenu(
 			if (!real) {
 				return;
 			}
+			const auto type = std::make_shared<RecordingType>();
 			const auto recordStartDate = real->recordStartDate();
 			const auto done = [=](QString title) {
 				if (const auto strong = weak.get()) {
-					strong->toggleRecording(!recordStartDate, title);
+					strong->toggleRecording(
+						!recordStartDate,
+						title,
+						(*type) != RecordingType::AudioOnly,
+						(*type) == RecordingType::VideoPortrait);
 				}
 			};
 			if (recordStartDate) {
@@ -643,33 +560,20 @@ void FillMenu(
 					StopGroupCallRecordingBox,
 					done));
 			} else {
-				showBox(Box(
-					StartGroupCallRecordingBox,
-					real->title(),
-					done));
+				const auto typeDone = [=](RecordingType newType) {
+					*type = newType;
+					showBox(Box(
+						AddTitleGroupCallRecordingBox,
+						real->title(),
+						done));
+				};
+				showBox(Box(StartGroupCallRecordingBox, typeDone));
 			}
 		};
 		menu->addAction(MakeRecordingAction(
 			menu->menu(),
 			real->recordStartDateValue(),
 			handler));
-	}
-	if (addScreenCast) {
-		const auto sharing = call->isSharingScreen();
-		const auto toggle = [=] {
-			if (const auto strong = weak.get()) {
-				if (sharing) {
-					strong->toggleScreenSharing(std::nullopt);
-				} else {
-					chooseShareScreenSource();
-				}
-			}
-		};
-		menu->addAction(
-			(call->isSharingScreen()
-				? tr::lng_group_call_screen_share_stop(tr::now)
-				: tr::lng_group_call_screen_share_start(tr::now)),
-			toggle);
 	}
 	menu->addAction(tr::lng_group_call_settings(tr::now), [=] {
 		if (const auto strong = weak.get()) {

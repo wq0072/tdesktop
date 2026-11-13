@@ -16,6 +16,7 @@ using PeerIdZero = void(PeerIdZeroHelper::*)();
 template <uint8 Shift>
 struct ChatIdType {
 	BareId bare = 0;
+
 	static constexpr BareId kShift = Shift;
 	static constexpr BareId kReservedBit = BareId(0x80);
 	static_assert((Shift & kReservedBit) == 0, "Last bit is reserved.");
@@ -25,10 +26,12 @@ struct ChatIdType {
 	//}
 	constexpr ChatIdType(BareId value) noexcept : bare(value) {
 	}
-	constexpr ChatIdType(int32 value) noexcept : bare(value) { // #TODO ids remove
+	constexpr ChatIdType(MTPlong value) noexcept : bare(value.v) {
 	}
-	constexpr ChatIdType(MTPint value) noexcept : bare(value.v) { // #TODO ids
-	}
+
+	friend inline constexpr auto operator<=>(
+		ChatIdType,
+		ChatIdType) = default;
 
 	[[nodiscard]] constexpr explicit operator bool() const noexcept {
 		return (bare != 0);
@@ -38,48 +41,6 @@ struct ChatIdType {
 	}
 
 };
-
-template <uchar Shift>
-[[nodiscard]] inline constexpr bool operator==(
-		ChatIdType<Shift> a,
-		ChatIdType<Shift> b) noexcept {
-	return (a.bare == b.bare);
-}
-
-template <uchar Shift>
-[[nodiscard]] inline constexpr bool operator!=(
-		ChatIdType<Shift> a,
-		ChatIdType<Shift> b) noexcept {
-	return (a.bare != b.bare);
-}
-
-template <uchar Shift>
-[[nodiscard]] inline constexpr bool operator<(
-		ChatIdType<Shift> a,
-		ChatIdType<Shift> b) noexcept {
-	return (a.bare < b.bare);
-}
-
-template <uchar Shift>
-[[nodiscard]] inline constexpr bool operator>(
-		ChatIdType<Shift> a,
-		ChatIdType<Shift> b) noexcept {
-	return (a.bare > b.bare);
-}
-
-template <uchar Shift>
-[[nodiscard]] inline constexpr bool operator<=(
-		ChatIdType<Shift> a,
-		ChatIdType<Shift> b) noexcept {
-	return (a.bare <= b.bare);
-}
-
-template <uchar Shift>
-[[nodiscard]] inline constexpr bool operator>=(
-		ChatIdType<Shift> a,
-		ChatIdType<Shift> b) noexcept {
-	return (a.bare >= b.bare);
-}
 
 template <uchar Shift>
 [[nodiscard]] inline constexpr bool operator==(
@@ -138,8 +99,6 @@ using ChatId = ChatIdType<1>;
 using ChannelId = ChatIdType<2>;
 using FakeChatId = ChatIdType<0x7F>;
 
-inline constexpr auto NoChannel = ChannelId(0);
-
 struct PeerIdHelper {
 	BareId value = 0;
 	constexpr PeerIdHelper(BareId value) noexcept : value(value) {
@@ -162,6 +121,8 @@ struct PeerId {
 	constexpr PeerId(PeerIdHelper value) noexcept : value(value.value) {
 	}
 
+	friend inline constexpr auto operator<=>(PeerId, PeerId) = default;
+
 	template <typename SomeChatIdType, BareId = SomeChatIdType::kShift>
 	[[nodiscard]] constexpr bool is() const noexcept {
 		return ((value >> 48) & BareId(0xFF)) == SomeChatIdType::kShift;
@@ -180,30 +141,6 @@ struct PeerId {
 	}
 
 };
-
-[[nodiscard]] inline constexpr bool operator==(PeerId a, PeerId b) noexcept {
-	return (a.value == b.value);
-}
-
-[[nodiscard]] inline constexpr bool operator!=(PeerId a, PeerId b) noexcept {
-	return (a.value != b.value);
-}
-
-[[nodiscard]] inline constexpr bool operator<(PeerId a, PeerId b) noexcept {
-	return (a.value < b.value);
-}
-
-[[nodiscard]] inline constexpr bool operator>(PeerId a, PeerId b) noexcept {
-	return (a.value > b.value);
-}
-
-[[nodiscard]] inline constexpr bool operator<=(PeerId a, PeerId b) noexcept {
-	return (a.value <= b.value);
-}
-
-[[nodiscard]] inline constexpr bool operator>=(PeerId a, PeerId b) noexcept {
-	return (a.value >= b.value);
-}
 
 [[nodiscard]] inline constexpr bool operator==(
 		PeerId a,
@@ -263,7 +200,7 @@ bool operator>=(PeerIdZero, PeerId) = delete;
 	return channelId;
 }
 
-[[nodiscard]] inline constexpr PeerId peerFromUser(MTPint userId) noexcept { // #TODO ids
+[[nodiscard]] inline constexpr PeerId peerFromUser(MTPlong userId) noexcept {
 	return peerFromUser(userId.v);
 }
 
@@ -288,8 +225,8 @@ bool operator>=(PeerIdZero, PeerId) = delete;
 	return id.to<ChannelId>();
 }
 
-[[nodiscard]] inline MTPint peerToBareMTPInt(PeerId id) { // #TODO ids
-	return MTP_int(id.value & PeerId::kChatTypeMask);
+[[nodiscard]] inline MTPlong peerToBareMTPInt(PeerId id) {
+	return MTP_long(id.value & PeerId::kChatTypeMask);
 }
 
 [[nodiscard]] PeerId peerFromMTP(const MTPPeer &peer);

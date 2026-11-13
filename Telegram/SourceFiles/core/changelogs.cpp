@@ -9,10 +9,13 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "lang/lang_keys.h"
 #include "core/application.h"
+#include "core/update_channel.h"
+#include "core/version.h"
 #include "main/main_domain.h"
 #include "main/main_session.h"
 #include "storage/storage_domain.h"
 #include "data/data_session.h"
+#include "base/qt/qt_common_adapters.h"
 #include "mainwindow.h"
 #include "apiwrap.h"
 
@@ -22,92 +25,23 @@ namespace {
 std::map<int, const char*> BetaLogs() {
 	return {
 	{
-		2007005,
-		"- Add \"Voice chats\" filter in \"Recent actions\" for channels.\n"
+		4008011,
+		"- Fix initial video playback speed.\n"
 
-		"- Write local drafts to disk on a background thread.\n"
+		"- Use native window resize on Windows 11.\n"
 
-		"- Support autoupdate for Telegram in write-protected folders on Linux.\n"
-
-		"- Fix crash in native notifications on Linux.\n"
-
-		"- Fix crash in file dialog on Linux.\n"
+		"- Fix memory leak in Direct3D 11 media viewer on Windows.\n"
 	},
 	{
-		2007007,
-		"- Optimized video playback in media viewer and Picture-in-Picture mode.\n"
+		4010004,
+		"- Statistics in channels and group chats.\n"
 
-		"- Added integration with System Media Transport Controls on Windows 10.\n"
+		"- Nice looking code blocks with syntax highlight.\n"
 
-		"- Added \"Now Playing\" integration for music playback on macOS.\n"
+		"- Copy full code block by click on its header.\n"
 
-		"- Added \"Archive Sticker\" into the \"...\" menu of the Sticker Set Box.\n"
-
-		"- Fixed memory not being freed on Linux.\n"
-
-		"- Several crash fixes.\n"
-	},
-	{
-		2007009,
-		"- Added \"Enable noise suppression\" option to group calls Settings.\n"
-
-		"- Fix media viewer with Retina + Non-Retina dual monitor setup on macOS.\n"
-
-		"- Several bug and crash fixes.\n"
-	},
-	{
-		2007010,
-		"- Added ability to mix together bold, italic and other formatting.\n"
-
-		"- Fix voice chats and video calls OpenGL with some drivers on Windows.\n"
-
-		"- Several bug fixes.\n"
-	},
-	{
-		2008006,
-		"- Added a simple image editor. "
-		"Crop photos or highlight parts of screenshots before sending.\n"
-
-		"- Use Direct3D 9 backend in ANGLE by default (Windows).\n"
-
-		"- Fix \"Show in Finder\" not focusing the Finder window (macOS).\n"
-
-		"- Use GTK from a child process (Linux).\n"
-	},
-	{
-		2008012,
-		"- Change the default chat background.\n"
-
-		"- Add GIFs overview section in chats.\n"
-
-		"- Add a simple new messages animation.\n"
-
-		"- Use modern Telegram application icon.\n"
-
-		"- Use Direct3D 11 by default on Windows.\n"
-
-		"- Fix Direct3D acceleration on basic Windows 7 setup.\n"
-	},
-	{
-		2009004,
-		"- Choose one from dozens of new gorgeous animated backgrounds"
-		" in Chat Settings > Chat background.\n"
-	},
-	{
-		2009005,
-		"- Tile chat background patterns horizontally.\n"
-
-		"- Fix a rare crash in spellchecker on Windows.\n"
-
-		"- Fix animated chat backgrounds in Saved Messages.\n"
-
-		"- Fix \"Sorry, group is inaccessible\" message "
-		"in scheduled voice chats.\n",
-	},
-	{
-		2009013,
-		"- See unread comments count when scrolling discussions in channels."
-	},
+		"- Send a highlighted code block using ```language syntax.\n"
+	}
 	};
 };
 
@@ -119,13 +53,17 @@ Changelogs::Changelogs(not_null<Main::Session*> session, int oldVersion)
 	_session->data().chatsListChanges(
 	) | rpl::filter([](Data::Folder *folder) {
 		return !folder;
-	}) | rpl::start_with_next([=] {
+	}) | rpl::on_next([=] {
 		requestCloudLogs();
 	}, _chatsSubscription);
 }
 
 std::unique_ptr<Changelogs> Changelogs::Create(
 		not_null<Main::Session*> session) {
+	if (BuildIsCanary) {
+		// Canary changelogs live in the canary channels themselves.
+		return nullptr;
+	}
 	auto &local = Core::App().domain().local();
 	const auto oldVersion = local.oldVersion();
 	local.clearOldVersion();
@@ -192,7 +130,7 @@ void Changelogs::addLocalLog(const QString &text) {
 };
 
 void Changelogs::addBetaLogs() {
-	for (const auto [version, changes] : BetaLogs()) {
+	for (const auto &[version, changes] : BetaLogs()) {
 		addBetaLog(version, changes);
 	}
 }
@@ -203,15 +141,15 @@ void Changelogs::addBetaLog(int changeVersion, const char *changes) {
 	}
 	const auto text = [&] {
 		static const auto simple = u"\n- "_q;
-		static const auto separator = QString::fromUtf8("\n\xE2\x80\xA2 ");
+		static const auto separator = '\n' + Ui::kQBullet + ' ';
 		auto result = QString::fromUtf8(changes).trimmed();
-		if (result.startsWith(simple.midRef(1))) {
+		if (result.startsWith(base::StringViewMid(simple, 1))) {
 			result = separator.mid(1) + result.mid(simple.size() - 1);
 		}
 		return result.replace(simple, separator);
 	}();
 	const auto version = FormatVersionDisplay(changeVersion);
-	const auto log = qsl("New in version %1 beta:\n\n").arg(version) + text;
+	const auto log = u"New in version %1 beta:\n\n"_q.arg(version) + text;
 	addLocalLog(log);
 }
 

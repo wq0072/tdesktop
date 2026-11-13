@@ -17,6 +17,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/widgets/continuous_sliders.h"
 #include "ui/widgets/shadow.h"
 #include "ui/widgets/buttons.h"
+#include "ui/widgets/popup_menu.h"
+#include "ui/widgets/dropdown_menu.h"
+#include "ui/widgets/menu/menu_action.h"
+#include "ui/wrap/fade_wrap.h"
 #include "ui/effects/ripple_animation.h"
 #include "ui/text/format_values.h"
 #include "ui/text/format_song_document_name.h"
@@ -25,80 +29,76 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "media/view/media_view_playback_progress.h"
 #include "media/player/media_player_button.h"
 #include "media/player/media_player_instance.h"
+#include "media/player/media_player_dropdown.h"
 #include "media/player/media_player_volume_controller.h"
-#include "styles/style_media_player.h"
-#include "styles/style_media_view.h"
 #include "history/history_item.h"
+#include "history/history_item_helpers.h"
 #include "storage/storage_account.h"
 #include "main/main_session.h"
-#include "facades.h"
+#include "window/window_session_controller.h"
+#include "styles/style_media_player.h"
 
 namespace Media {
 namespace Player {
 
-using ButtonState = PlayButtonLayout::State;
-
-class Widget::PlayButton : public Ui::RippleButton {
-public:
-	PlayButton(QWidget *parent);
-
-	void setState(PlayButtonLayout::State state) {
-		_layout.setState(state);
-	}
-	void finishTransform() {
-		_layout.finishTransform();
-	}
-
-protected:
-	void paintEvent(QPaintEvent *e) override;
-
-	QImage prepareRippleMask() const override;
-	QPoint prepareRippleStartPosition() const override;
-
-private:
-	PlayButtonLayout _layout;
-
-};
-
-Widget::PlayButton::PlayButton(QWidget *parent) : Ui::RippleButton(parent, st::mediaPlayerButton.ripple)
-, _layout(st::mediaPlayerButton, [this] { update(); }) {
-	resize(st::mediaPlayerButtonSize);
-	setCursor(style::cur_pointer);
-}
-
-void Widget::PlayButton::paintEvent(QPaintEvent *e) {
-	Painter p(this);
-
-	paintRipple(p, st::mediaPlayerButton.rippleAreaPosition.x(), st::mediaPlayerButton.rippleAreaPosition.y());
-	p.translate(st::mediaPlayerButtonPosition.x(), st::mediaPlayerButtonPosition.y());
-	_layout.paint(p, st::mediaPlayerActiveFg);
-}
-
-QImage Widget::PlayButton::prepareRippleMask() const {
-	auto size = QSize(st::mediaPlayerButton.rippleAreaSize, st::mediaPlayerButton.rippleAreaSize);
-	return Ui::RippleAnimation::ellipseMask(size);
-}
-
-QPoint Widget::PlayButton::prepareRippleStartPosition() const {
-	return QPoint(mapFromGlobal(QCursor::pos()) - st::mediaPlayerButton.rippleAreaPosition);
-}
-
-Widget::Widget(QWidget *parent, not_null<Main::Session*> session)
+Widget::Widget(
+	QWidget *parent,
+	not_null<Ui::RpWidget*> dropdownsParent,
+	not_null<Window::SessionController*> controller)
 : RpWidget(parent)
-, _session(session)
+, _controller(controller)
+, _orderMenuParent(dropdownsParent)
 , _nameLabel(this, st::mediaPlayerName)
-, _timeLabel(this, st::mediaPlayerTime)
-, _playPause(this)
-, _volumeToggle(this, st::mediaPlayerVolumeToggle)
-, _repeatTrack(this, st::mediaPlayerRepeatButton)
-, _playbackSpeed(this, st::mediaPlayerSpeedButton)
+, _rightControls(this, object_ptr<Ui::RpWidget>(this))
+, _timeLabel(rightControls(), st::mediaPlayerTime)
+, _playPause(this, st::mediaPlayerPlayButton)
+, _volumeToggle(rightControls(), st::mediaPlayerVolumeToggle)
+, _repeatToggle(rightControls(), st::mediaPlayerRepeatButton)
+, _orderToggle(rightControls(), st::mediaPlayerOrderButton)
+, _speedToggle(rightControls(), st::mediaPlayerSpeedButton)
 , _close(this, st::mediaPlayerClose)
 , _shadow(this)
 , _playbackSlider(this, st::mediaPlayerPlayback)
-, _playbackProgress(std::make_unique<View::PlaybackProgress>()) {
+, _volume(std::in_place, dropdownsParent.get())
+, _playbackProgress(std::make_unique<View::PlaybackProgress>())
+, _orderController(
+	std::make_unique<OrderController>(
+		_orderToggle.data(),
+		dropdownsParent,
+		[=](bool over) { markOver(over); },
+		Core::App().settings().playerOrderModeValue(),
+		[=](OrderMode value) { saveOrder(value); }))
+, _speedController(
+	std::make_unique<SpeedController>(
+		_speedToggle.data(),
+		_speedToggle->st(),
+		dropdownsParent,
+		[=](bool over) { markOver(over); },
+		[=](bool lastNonDefault) { return speedLookup(lastNonDefault); },
+		[=](float64 speed) { saveSpeed(speed); })) {
+	_speedController->setApplySpeed([=](float64 speed) {
+		instance()->setPlaybackSpeed(speed);
+	});
+	_speedController->realtimeValue(
+	) | rpl::on_next([=](float64 speed) {
+		_speedToggle->setSpeed(speed);
+		_speedToggle->setAccessibleName(tr::lng_mediaview_playback_speed(
+			tr::now,
+			lt_speed,
+			QString::number(base::SafeRound(speed * 10) / 10.) + "x"));
+	}, _speedToggle->lifetime());
+	_speedToggle->finishAnimating();
+
 	setAttribute(Qt::WA_OpaquePaintEvent);
 	setMouseTracking(true);
 	resize(width(), st::mediaPlayerHeight + st::lineWidth);
+
+	setupRightControls();
+
+	_volumeToggle->setAccessibleName(tr::lng_ringtones_box_volume(tr::now));
+	_repeatToggle->setAccessibleName(tr::lng_schedule_repeat_label(tr::now));
+	_orderToggle->setAccessibleName(tr::lng_sr_playback_order(tr::now));
+	_close->setAccessibleName(tr::lng_sr_player_close(tr::now));
 
 	_nameLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
 	_timeLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
@@ -137,71 +137,176 @@ Widget::Widget(QWidget *parent, not_null<Main::Session*> session)
 		mixer()->setSongVolume(volume);
 	});
 	Core::App().settings().songVolumeChanges(
-	) | rpl::start_with_next([=] {
+	) | rpl::on_next([=] {
 		updateVolumeToggleIcon();
 	}, lifetime());
 
-	updateRepeatTrackIcon();
-	_repeatTrack->setClickedCallback([=] {
-		instance()->toggleRepeat(AudioMsgId::Type::Song);
-	});
+	Core::App().settings().playerRepeatModeValue(
+	) | rpl::on_next([=] {
+		updateRepeatToggleIcon();
+	}, lifetime());
 
-	updatePlaybackSpeedIcon();
-	_playbackSpeed->setClickedCallback([=] {
-		const auto doubled = (Core::App().settings().voicePlaybackSpeed()
-			== 2.);
-		Core::App().settings().setVoicePlaybackSpeed(doubled ? 1. : 2.);
-		instance()->updateVoicePlaybackSpeed();
-		updatePlaybackSpeedIcon();
+	_repeatToggle->setClickedCallback([=] {
+		auto &settings = Core::App().settings();
+		settings.setPlayerRepeatMode([&] {
+			switch (settings.playerRepeatMode()) {
+			case RepeatMode::None: return RepeatMode::One;
+			case RepeatMode::One: return RepeatMode::All;
+			case RepeatMode::All: return RepeatMode::None;
+			}
+			Unexpected("Repeat mode in Settings.");
+		}());
 		Core::App().saveSettingsDelayed();
 	});
 
-	subscribe(instance()->repeatChangedNotifier(), [this](AudioMsgId::Type type) {
-		if (type == _type) {
-			updateRepeatTrackIcon();
+	_speedController->saved(
+	) | rpl::on_next([=] {
+		instance()->updatePlaybackSpeed();
+	}, lifetime());
+
+	rpl::merge(
+		Core::App().settings().voicePlaybackSpeedChanges() | rpl::to_empty,
+		Core::App().settings().audioPlaybackSpeedChanges() | rpl::to_empty
+	) | rpl::on_next([=] {
+		_speedController->reloadFromLookup();
+	}, lifetime());
+
+	instance()->trackChanged(
+	) | rpl::filter([=](AudioMsgId::Type type) {
+		return (type == _type);
+	}) | rpl::on_next([=](AudioMsgId::Type type) {
+		handleSongChange();
+		updateControlsVisibility();
+		updateLabelsGeometry();
+	}, lifetime());
+
+	rpl::merge(
+		instance()->tracksFinished(
+		) | rpl::filter([=](AudioMsgId::Type type) {
+			return (type == AudioMsgId::Type::Voice);
+		}) | rpl::to_empty,
+		instance()->stops(AudioMsgId::Type::Voice)
+	) | rpl::on_next([=] {
+		_voiceIsActive = false;
+		const auto currentSong = instance()->current(AudioMsgId::Type::Song);
+		const auto songState = instance()->getState(AudioMsgId::Type::Song);
+		if (currentSong == songState.id && !IsStoppedOrStopping(songState.state)) {
+			setType(AudioMsgId::Type::Song);
 		}
-	});
-	subscribe(instance()->trackChangedNotifier(), [this](AudioMsgId::Type type) {
-		if (type == _type) {
-			handleSongChange();
-			updateControlsVisibility();
-			updateLabelsGeometry();
-		}
-	});
-	subscribe(instance()->tracksFinishedNotifier(), [this](AudioMsgId::Type type) {
-		if (type == AudioMsgId::Type::Voice) {
-			_voiceIsActive = false;
-			const auto currentSong = instance()->current(AudioMsgId::Type::Song);
-			const auto songState = instance()->getState(AudioMsgId::Type::Song);
-			if (currentSong == songState.id && !IsStoppedOrStopping(songState.state)) {
-				setType(AudioMsgId::Type::Song);
-			}
-		}
-	});
+	}, lifetime());
 
 	instance()->updatedNotifier(
-	) | rpl::start_with_next([=](const TrackState &state) {
+	) | rpl::on_next([=](const TrackState &state) {
 		handleSongUpdate(state);
 	}, lifetime());
+
+	PrepareVolumeDropdown(_volume.get(), controller, _volumeToggle->events(
+	) | rpl::filter([=](not_null<QEvent*> e) {
+		return (e->type() == QEvent::Wheel);
+	}) | rpl::map([=](not_null<QEvent*> e) {
+		return not_null{ static_cast<QWheelEvent*>(e.get()) };
+	}));
+	_volumeToggle->installEventFilter(_volume.get());
+	_volume->events(
+	) | rpl::on_next([=](not_null<QEvent*> e) {
+		if (e->type() == QEvent::Enter) {
+			markOver(true);
+		} else if (e->type() == QEvent::Leave) {
+			markOver(false);
+		}
+	}, _volume->lifetime());
+
+	hidePlaylistOn(_playPause);
+	hidePlaylistOn(_close);
+	hidePlaylistOn(_rightControls);
+
+	hideDropdownsOn(_volumeToggle);
+	hideDropdownsOn(_orderToggle);
+	hideDropdownsOn(_speedToggle);
+
+	const auto otherDropdownCheck = [=](QPoint globalPosition) {
+		return overDropdownControl(globalPosition);
+	};
+	_orderController->setOtherDropdownCheck(otherDropdownCheck);
+	_speedController->setOtherDropdownCheck(otherDropdownCheck);
 
 	setType(AudioMsgId::Type::Song);
 	_playPause->finishTransform();
 }
 
-void Widget::updateVolumeToggleIcon() {
-	auto icon = []() -> const style::icon * {
-		auto volume = Core::App().settings().songVolume();
-		if (volume > 0) {
-			if (volume < 1 / 3.) {
-				return &st::mediaPlayerVolumeIcon1;
-			} else if (volume < 2 / 3.) {
-				return &st::mediaPlayerVolumeIcon2;
-			}
-			return &st::mediaPlayerVolumeIcon3;
-		}
-		return nullptr;
+void Widget::hidePlaylistOn(not_null<Ui::RpWidget*> widget) {
+	widget->events(
+	) | rpl::filter([=](not_null<QEvent*> e) {
+		return (e->type() == QEvent::Enter);
+	}) | rpl::on_next([=] {
+		updateOverLabelsState(false);
+	}, widget->lifetime());
+}
+
+void Widget::hideDropdownsOn(not_null<Ui::RpWidget*> widget) {
+	widget->events(
+	) | rpl::filter([=](not_null<QEvent*> e) {
+		return (e->type() == QEvent::Enter);
+	}) | rpl::on_next([=] {
+		hideDropdowns(widget);
+	}, widget->lifetime());
+}
+
+bool Widget::overDropdownControl(QPoint globalPosition) const {
+	const auto over = [&](not_null<Ui::RpWidget*> control) {
+		return !control->isHidden()
+			&& control->rect().contains(
+				control->mapFromGlobal(globalPosition));
 	};
-	_volumeToggle->setIconOverride(icon());
+	return over(_volumeToggle)
+		|| over(_orderToggle)
+		|| over(_speedToggle);
+}
+
+void Widget::hideDropdowns(not_null<Ui::RpWidget*> except) {
+	if (except.get() != _volumeToggle.data()) {
+		_volume->hideFast();
+	}
+	if (except.get() != _orderToggle.data()) {
+		if (const auto menu = _orderController->menu()) {
+			menu->hideFast();
+		}
+	}
+	if (except.get() != _speedToggle.data()) {
+		if (const auto menu = _speedController->menu()) {
+			menu->hideFast();
+		}
+	}
+}
+
+void Widget::setupRightControls() {
+	const auto raw = rightControls();
+	raw->paintRequest(
+	) | rpl::on_next([=](QRect clip) {
+		auto p = QPainter(raw);
+		const auto &icon = st::mediaPlayerControlsFade;
+		const auto fade = QRect(0, 0, icon.width(), raw->height());
+		if (fade.intersects(clip)) {
+			icon.fill(p, fade);
+		}
+		const auto fill = clip.intersected(
+			{ icon.width(), 0, raw->width() - icon.width(), raw->height() });
+		if (!fill.isEmpty()) {
+			p.fillRect(fill, st::mediaPlayerBg);
+		}
+	}, raw->lifetime());
+	_rightControls->show(anim::type::instant);
+}
+
+void Widget::updateVolumeToggleIcon() {
+	_volumeToggle->setIconOverride([] {
+		const auto volume = Core::App().settings().songVolume();
+		return (volume == 0.)
+			? &st::mediaPlayerVolumeIcon0
+			: (volume < 0.66)
+			? &st::mediaPlayerVolumeIcon1
+			: nullptr;
+	}());
 }
 
 void Widget::setCloseCallback(Fn<void()> callback) {
@@ -233,28 +338,52 @@ void Widget::setShadowGeometryToLeft(int x, int y, int w, int h) {
 	_shadow->setGeometryToLeft(x, y, w, h);
 }
 
-void Widget::showShadow() {
+void Widget::showShadowAndDropdowns() {
 	_shadow->show();
 	_playbackSlider->setVisible(_type == AudioMsgId::Type::Song);
+	if (_volumeHidden) {
+		_volumeHidden = false;
+		_volume->show();
+	}
+	_speedController->showBack();
+	_orderController->showBack();
 }
 
-void Widget::hideShadow() {
+void Widget::updateDropdownsGeometry() {
+	const auto dropdownWidth = st::mediaPlayerVolumeSize.width();
+	const auto position = _volume->parentWidget()->mapFromGlobal(
+		_volumeToggle->mapToGlobal(
+			QPoint(
+				(_volumeToggle->width() - dropdownWidth) / 2,
+				height())));
+	const auto playerMargins = _volume->getMargin();
+	const auto shift = QPoint(playerMargins.left(), playerMargins.top());
+	_volume->move(position - shift);
+
+	_orderController->updateDropdownGeometry();
+	_speedController->updateDropdownGeometry();
+}
+
+void Widget::hideShadowAndDropdowns() {
 	_shadow->hide();
 	_playbackSlider->hide();
+	if (!_volume->isHidden()) {
+		_volumeHidden = true;
+		_volume->hide();
+	}
+	_speedController->hideTemporarily();
+	_orderController->hideTemporarily();
 }
 
-QPoint Widget::getPositionForVolumeWidget() const {
-	auto x = _volumeToggle->x();
-	x += (_volumeToggle->width() - st::mediaPlayerVolumeSize.width()) / 2;
-	if (rtl()) x = width() - x - st::mediaPlayerVolumeSize.width();
-	return QPoint(x, height());
-}
-
-void Widget::volumeWidgetCreated(VolumeWidget *widget) {
-	_volumeToggle->installEventFilter(widget);
+void Widget::raiseDropdowns() {
+	_volume->raise();
 }
 
 Widget::~Widget() = default;
+
+not_null<Ui::RpWidget*> Widget::rightControls() {
+	return _rightControls->entity();
+}
 
 void Widget::handleSeekProgress(float64 progress) {
 	if (!_lastDurationMs) return;
@@ -281,32 +410,108 @@ void Widget::handleSeekFinished(float64 progress) {
 
 void Widget::resizeEvent(QResizeEvent *e) {
 	updateControlsGeometry();
+	_narrow = (width() < st::mediaPlayerWideWidth);
+	updateControlsWrapVisibility();
 }
 
 void Widget::updateControlsGeometry() {
-	auto right = st::mediaPlayerCloseRight;
-	_close->moveToRight(right, st::mediaPlayerPlayTop); right += _close->width();
+	_close->moveToRight(st::mediaPlayerCloseRight, st::mediaPlayerPlayTop);
+	auto right = 0;
 	if (hasPlaybackSpeedControl()) {
-		_playbackSpeed->moveToRight(right, st::mediaPlayerPlayTop); right += _playbackSpeed->width();
+		_speedToggle->moveToRight(right, 0); right += _speedToggle->width();
 	}
-	_repeatTrack->moveToRight(right, st::mediaPlayerPlayTop); right += _repeatTrack->width();
-	_volumeToggle->moveToRight(right, st::mediaPlayerPlayTop); right += _volumeToggle->width();
+	if (_type == AudioMsgId::Type::Song) {
+		_repeatToggle->moveToRight(right, 0); right += _repeatToggle->width();
+		_orderToggle->moveToRight(right, 0); right += _orderToggle->width();
+	}
+	_volumeToggle->moveToRight(right, 0); right += _volumeToggle->width();
+
+	updateControlsWrapGeometry();
 
 	updatePlayPrevNextPositions();
 
-	_playbackSlider->setGeometry(0, height() - st::mediaPlayerPlayback.fullWidth, width(), st::mediaPlayerPlayback.fullWidth);
+	_playbackSlider->setGeometry(
+		0,
+		height() - st::mediaPlayerPlayback.fullWidth,
+		width(),
+		st::mediaPlayerPlayback.fullWidth);
+
+	updateDropdownsGeometry();
+}
+
+void Widget::updateControlsWrapGeometry() {
+	const auto fade = st::mediaPlayerControlsFade.width();
+	const auto controls = getTimeRight() + _timeLabel->width() + fade;
+	rightControls()->resize(controls, _repeatToggle->height());
+	_rightControls->move(
+		width() - st::mediaPlayerCloseRight - _close->width() - controls,
+		st::mediaPlayerPlayTop);
+}
+
+void Widget::updateControlsWrapVisibility() {
+	_rightControls->toggle(
+		_over || !_narrow,
+		isHidden() ? anim::type::instant : anim::type::normal);
 }
 
 void Widget::paintEvent(QPaintEvent *e) {
-	Painter p(this);
-	auto fill = e->rect().intersected(QRect(0, 0, width(), st::mediaPlayerHeight));
+	auto p = QPainter(this);
+	auto fill = e->rect().intersected(
+		QRect(0, 0, width(), st::mediaPlayerHeight + st::lineWidth));
 	if (!fill.isEmpty()) {
 		p.fillRect(fill, st::mediaPlayerBg);
 	}
 }
 
+void Widget::enterEventHook(QEnterEvent *e) {
+	markOver(true);
+}
+
 void Widget::leaveEventHook(QEvent *e) {
-	updateOverLabelsState(false);
+	markOver(false);
+}
+
+void Widget::markOver(bool over) {
+	if (over) {
+		_over = true;
+		_wontBeOver = false;
+		InvokeQueued(this, [=] {
+			updateControlsWrapVisibility();
+		});
+	} else {
+		_wontBeOver = true;
+		InvokeQueued(this, [=] {
+			if (!_wontBeOver) {
+				return;
+			}
+			_wontBeOver = false;
+			_over = false;
+			updateControlsWrapVisibility();
+		});
+		updateOverLabelsState(false);
+	}
+}
+
+void Widget::saveOrder(OrderMode mode) {
+	Core::App().settings().setPlayerOrderMode(mode);
+	Core::App().saveSettingsDelayed();
+}
+
+float64 Widget::speedLookup(bool lastNonDefault) const {
+	const auto &settings = Core::App().settings();
+	return (_type == AudioMsgId::Type::Song)
+		? settings.audioPlaybackSpeed(lastNonDefault)
+		: settings.voicePlaybackSpeed(lastNonDefault);
+}
+
+void Widget::saveSpeed(float64 speed) {
+	auto &settings = Core::App().settings();
+	if (_type == AudioMsgId::Type::Song) {
+		settings.setAudioPlaybackSpeed(speed);
+	} else {
+		settings.setVoicePlaybackSpeed(speed);
+	}
+	Core::App().saveSettingsDelayed();
 }
 
 void Widget::mouseMoveEvent(QMouseEvent *e) {
@@ -322,7 +527,8 @@ void Widget::mouseReleaseEvent(QMouseEvent *e) {
 		if (_labelsOver != downLabels) {
 			return;
 		}
-		if (_type == AudioMsgId::Type::Voice) {
+		if ((_type == AudioMsgId::Type::Voice)
+				|| _lastSongFromAnotherSession) {
 			const auto current = instance()->current(_type);
 			const auto document = current.audio();
 			const auto context = current.contextId();
@@ -336,19 +542,23 @@ void Widget::mouseReleaseEvent(QMouseEvent *e) {
 }
 
 void Widget::updateOverLabelsState(QPoint pos) {
-	auto left = getLabelsLeft();
-	auto right = getLabelsRight();
-	auto labels = myrtlrect(left, 0, width() - right - left, height() - st::mediaPlayerPlayback.fullWidth);
-	auto over = labels.contains(pos);
+	const auto left = getNameLeft();
+	const auto right = width()
+		- _rightControls->x()
+		- _rightControls->width()
+		+ getTimeRight();
+	const auto labels = myrtlrect(left, 0, width() - right - left, height() - st::mediaPlayerPlayback.fullWidth);
+	const auto over = labels.contains(pos);
 	updateOverLabelsState(over);
 }
 
 void Widget::updateOverLabelsState(bool over) {
 	_labelsOver = over;
-	auto pressShowsItem = _labelsOver && (_type == AudioMsgId::Type::Voice);
+	const auto pressShowsItem = _labelsOver
+		&& ((_type == AudioMsgId::Type::Voice)
+			|| _lastSongFromAnotherSession);
 	setCursor(pressShowsItem ? style::cur_pointer : style::cur_default);
-	auto showPlaylist = over && (_type == AudioMsgId::Type::Song);
-	instance()->playerWidgetOver().notify(showPlaylist, true);
+	_togglePlaylistRequests.fire(over && (_type == AudioMsgId::Type::Song));
 }
 
 void Widget::updatePlayPrevNextPositions() {
@@ -364,7 +574,7 @@ void Widget::updatePlayPrevNextPositions() {
 	updateLabelsGeometry();
 }
 
-int Widget::getLabelsLeft() const {
+int Widget::getNameLeft() const {
 	auto result = st::mediaPlayerPlayLeft + _playPause->width();
 	if (_previousTrack) {
 		result += _previousTrack->width() + st::mediaPlayerPlaySkip + _nextTrack->width() + st::mediaPlayerPlaySkip;
@@ -373,44 +583,58 @@ int Widget::getLabelsLeft() const {
 	return result;
 }
 
-int Widget::getLabelsRight() const {
-	auto result = st::mediaPlayerCloseRight + _close->width();
+int Widget::getNameRight() const {
+	return st::mediaPlayerCloseRight
+		+ _close->width()
+		+ st::mediaPlayerPadding;
+}
+
+int Widget::getTimeRight() const {
+	auto result = 0;
+	result += _volumeToggle->width();
 	if (_type == AudioMsgId::Type::Song) {
-		result += _repeatTrack->width() + _volumeToggle->width();
+		result += _repeatToggle->width()
+			+ _orderToggle->width();
 	}
 	if (hasPlaybackSpeedControl()) {
-		result += _playbackSpeed->width();
+		result += _speedToggle->width();
 	}
 	result += st::mediaPlayerPadding;
 	return result;
 }
 
 void Widget::updateLabelsGeometry() {
-	auto left = getLabelsLeft();
-	auto right = getLabelsRight();
-
-	auto widthForName = width() - left - right;
-	widthForName -= _timeLabel->width() + 2 * st::normalFont->spacew;
-	_nameLabel->resizeToWidth(widthForName);
-
+	const auto left = getNameLeft();
+	const auto widthForName = width()
+		- left
+		- getNameRight();
+	_nameLabel->resizeToNaturalWidth(widthForName);
 	_nameLabel->moveToLeft(left, st::mediaPlayerNameTop - st::mediaPlayerName.style.font->ascent);
+
+	const auto right = getTimeRight();
 	_timeLabel->moveToRight(right, st::mediaPlayerNameTop - st::mediaPlayerTime.font->ascent);
+
+	updateControlsWrapGeometry();
 }
 
-void Widget::updateRepeatTrackIcon() {
-	auto repeating = instance()->repeatEnabled(AudioMsgId::Type::Song);
-	_repeatTrack->setIconOverride(repeating ? nullptr : &st::mediaPlayerRepeatDisabledIcon, repeating ? nullptr : &st::mediaPlayerRepeatDisabledIconOver);
-	_repeatTrack->setRippleColorOverride(repeating ? nullptr : &st::mediaPlayerRepeatDisabledRippleBg);
-}
-
-void Widget::updatePlaybackSpeedIcon() {
-	const auto speed = Core::App().settings().voicePlaybackSpeed();
-	const auto isDefaultSpeed = (speed == 1.);
-	_playbackSpeed->setIconOverride(
-		isDefaultSpeed ? &st::mediaPlayerSpeedDisabledIcon : nullptr,
-		isDefaultSpeed ? &st::mediaPlayerSpeedDisabledIconOver : nullptr);
-	_playbackSpeed->setRippleColorOverride(
-		isDefaultSpeed ? &st::mediaPlayerSpeedDisabledRippleBg : nullptr);
+void Widget::updateRepeatToggleIcon() {
+	switch (Core::App().settings().playerRepeatMode()) {
+	case RepeatMode::None:
+		_repeatToggle->setIconOverride(
+			&st::mediaPlayerRepeatDisabledIcon,
+			&st::mediaPlayerRepeatDisabledIconOver);
+		_repeatToggle->setRippleColorOverride(
+			&st::mediaPlayerRepeatDisabledRippleBg);
+		break;
+	case RepeatMode::One:
+		_repeatToggle->setIconOverride(&st::mediaPlayerRepeatOneIcon);
+		_repeatToggle->setRippleColorOverride(nullptr);
+		break;
+	case RepeatMode::All:
+		_repeatToggle->setIconOverride(nullptr);
+		_repeatToggle->setRippleColorOverride(nullptr);
+		break;
+	}
 }
 
 void Widget::checkForTypeChange() {
@@ -433,9 +657,9 @@ bool Widget::hasPlaybackSpeedControl() const {
 }
 
 void Widget::updateControlsVisibility() {
-	_repeatTrack->setVisible(_type == AudioMsgId::Type::Song);
-	_volumeToggle->setVisible(_type == AudioMsgId::Type::Song);
-	_playbackSpeed->setVisible(hasPlaybackSpeedControl());
+	_repeatToggle->setVisible(_type == AudioMsgId::Type::Song);
+	_orderToggle->setVisible(_type == AudioMsgId::Type::Song);
+	_speedToggle->setVisible(hasPlaybackSpeedControl());
 	if (!_shadow->isHidden()) {
 		_playbackSlider->setVisible(_type == AudioMsgId::Type::Song);
 	}
@@ -452,7 +676,7 @@ void Widget::setType(AudioMsgId::Type type) {
 		updateOverLabelsState(_labelsOver);
 		_playlistChangesLifetime = instance()->playlistChanges(
 			_type
-		) | rpl::start_with_next([=] {
+		) | rpl::on_next([=] {
 			handlePlaylistUpdate();
 		});
 		// maybe the type change causes a change of the button layout
@@ -477,15 +701,14 @@ void Widget::handleSongUpdate(const TrackState &state) {
 	if (instance()->isSeeking(_type)) {
 		showPause = true;
 	}
-	auto buttonState = [audio = state.id.audio(), showPause] {
-		if (audio->loading()) {
-			return ButtonState::Cancel;
-		} else if (showPause) {
-			return ButtonState::Pause;
-		}
-		return ButtonState::Play;
-	};
-	_playPause->setState(buttonState());
+	_playPause->setState(state.id.audio()->loading()
+		? PlayButton::State::Cancel
+		: showPause
+		? PlayButton::State::Pause
+		: PlayButton::State::Play);
+	_playPause->setAccessibleName(showPause
+		? tr::lng_shortcuts_media_pause(tr::now)
+		: tr::lng_shortcuts_media_play(tr::now));
 
 	updateTimeText(state);
 }
@@ -498,14 +721,15 @@ void Widget::updateTimeText(const TrackState &state) {
 		display = state.position;
 	} else if (state.length) {
 		display = state.length;
-	} else if (const auto song = document->song()) {
-		display = (song->duration * frequency);
+	} else if (document->song()) {
+		display = (document->duration() * frequency) / 1000;
 	}
 
 	_lastDurationMs = (state.length * 1000LL) / frequency;
 
 	if (document->loading()) {
-		_time = QString::number(qRound(document->progress() * 100)) + '%';
+		const auto progress = document->progress() * 100;
+		_time = QString::number(int(base::SafeRound(progress))) + '%';
 		_playbackSlider->setDisabled(true);
 	} else {
 		display = display / frequency;
@@ -533,6 +757,9 @@ void Widget::updateTimeLabel() {
 void Widget::handleSongChange() {
 	const auto current = instance()->current(_type);
 	const auto document = current.audio();
+	_lastSongFromAnotherSession = document
+		&& (document->session().uniqueId()
+			!= _controller->session().uniqueId());
 	if (!current
 		|| !document
 		|| ((_lastSongId.audio() == document)
@@ -540,51 +767,20 @@ void Widget::handleSongChange() {
 		return;
 	}
 	_lastSongId = current;
+	_speedController->reloadFromLookup();
 
-	TextWithEntities textWithEntities;
+	auto textWithEntities = TextWithEntities();
 	if (document->isVoiceMessage() || document->isVideoMessage()) {
-		if (const auto item = document->owner().message(current.contextId())) {
-			const auto name = item->fromOriginal()->name;
-			const auto date = [item] {
-				const auto parsed = ItemDateTime(item);
-				const auto date = parsed.date();
-				const auto time = parsed.time().toString(cTimeFormat());
-				const auto today = QDateTime::currentDateTime().date();
-				if (date == today) {
-					return tr::lng_player_message_today(
-						tr::now,
-						lt_time,
-						time);
-				} else if (date.addDays(1) == today) {
-					return tr::lng_player_message_yesterday(
-						tr::now,
-						lt_time,
-						time);
-				}
-				return tr::lng_player_message_date(
-					tr::now,
-					lt_date,
-					langDayOfMonthFull(date),
-					lt_time,
-					time);
-			};
-
-			textWithEntities.text = name + ' ' + date();
-			textWithEntities.entities.append(EntityInText(
-				EntityType::Semibold,
-				0,
-				name.size(),
-				QString()));
-		} else {
-			textWithEntities.text = tr::lng_media_audio(tr::now);
-		}
+		textWithEntities = Ui::Text::FormatVoiceName(
+			document,
+			current.contextId()).textWithEntities(true);
 	} else {
 		textWithEntities = Ui::Text::FormatSongNameFor(document)
 			.textWithEntities(true);
 	}
 	_nameLabel->setMarkedText(textWithEntities);
-
 	handlePlaylistUpdate();
+	updateLabelsGeometry();
 }
 
 void Widget::handlePlaylistUpdate() {
@@ -596,10 +792,10 @@ void Widget::handlePlaylistUpdate() {
 		createPrevNextButtons();
 		_previousTrack->setIconOverride(previousEnabled ? nullptr : &st::mediaPlayerPreviousDisabledIcon);
 		_previousTrack->setRippleColorOverride(previousEnabled ? nullptr : &st::mediaPlayerBg);
-		_previousTrack->setCursor(previousEnabled ? style::cur_pointer : style::cur_default);
+		_previousTrack->setPointerCursor(previousEnabled);
 		_nextTrack->setIconOverride(nextEnabled ? nullptr : &st::mediaPlayerNextDisabledIcon);
 		_nextTrack->setRippleColorOverride(nextEnabled ? nullptr : &st::mediaPlayerBg);
-		_nextTrack->setCursor(nextEnabled ? style::cur_pointer : style::cur_default);
+		_nextTrack->setPointerCursor(nextEnabled);
 	}
 }
 
@@ -608,13 +804,17 @@ void Widget::createPrevNextButtons() {
 		_previousTrack.create(this, st::mediaPlayerPreviousButton);
 		_previousTrack->show();
 		_previousTrack->setClickedCallback([=]() {
-			instance()->previous();
+			instance()->previous(_type);
 		});
+		_previousTrack->setAccessibleName(tr::lng_shortcuts_media_previous(tr::now));
 		_nextTrack.create(this, st::mediaPlayerNextButton);
 		_nextTrack->show();
 		_nextTrack->setClickedCallback([=]() {
-			instance()->next();
+			instance()->next(_type);
 		});
+		_nextTrack->setAccessibleName(tr::lng_shortcuts_media_next(tr::now));
+		hidePlaylistOn(_previousTrack);
+		hidePlaylistOn(_nextTrack);
 		updatePlayPrevNextPositions();
 	}
 }
